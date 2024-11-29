@@ -9,6 +9,8 @@ Dear ImGui
 
 <sub>(This library is available under a free and permissive license, but needs financial support to sustain its continued improvements. In addition to maintenance and stability there are many desirable features yet to be added. If your company is using Dear ImGui, please consider reaching out.)</sub>
 
+<p color=red>THIS WII PORT IS PURELY A PROOF OF CONCEPT AND MAY NOT EVER BE FINISHED</p>
+
 Businesses: support continued development and maintenance via invoiced sponsoring/support contracts:
 <br>&nbsp;&nbsp;_E-mail: contact @ dearimgui dot com_
 <br>Individuals: support continued development and maintenance [here](https://www.paypal.com/cgi-bin/webscr?cmd=_s-xclick&hosted_button_id=WGHNC6MBFLZ2S). Also see [Funding](https://github.com/ocornut/imgui/wiki/Funding) page.
