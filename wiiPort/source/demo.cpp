@@ -35,25 +35,50 @@
 // screen surface, the place where everything will get print onto
 SDL_Surface *screen = NULL;
 
+// IR Remote
+ir_t ir;
+
+// Quit on ESC?
+bool quitapp;
+
+// Button Thread.
 lwp_t buttonThread;
+
+// Counters.
+int keyCount;
 int prvCount;
+
+// Button Watcher Thread Function.
 static void* buttonThreadFunc(void* arg) {
+    // Counters
     prvCount=0;
+    keyCount=0;
+
+    // Thread loop
     while(true) {
-        WPAD_ScanPads();
+        // Scan for pad changes, and update IR.
+        //WPAD_ScanPads();
+        WPAD_IR(WPAD_CHAN_0, &ir);
+
+        // Pressed keys.
         s32 pressed = WPAD_ButtonsDown(WPAD_CHAN_0);
         if(pressed & WPAD_BUTTON_HOME) exit(0);
+
+        // Update Mouse Position
+        ImVec2 nMousePos;
+        nMousePos.x = ir.x;
+        nMousePos.y = ir.y;
+        ImGui::SetMousePosExternal(nMousePos);        
+
+        // Thread wait, and increment counter.
         SDL_Delay(10);
         prvCount++;
     }
 }
 
-void keyPress_cb( char sym) {
-
-	if (sym > 31 ) putchar(sym);
-	if (sym == 13) putchar('\n');
-
-	//if ( sym == 0x1b) quitapp = true;
+void keyPress_cb(char sym) {
+    keyCount++;
+	if ( sym == 0x1b) quitapp = true;
 }
 
 // Main code
@@ -77,26 +102,12 @@ int main(int, char**)
     SDL_SetHint(SDL_HINT_IME_SHOW_UI, "1");
 #endif
 
-    // create a new window
-    //screen = SDL_SetVideoMode(640, 480, 16, SDL_DOUBLEBUF);
-    //if ( !screen )
-    //{
-    //    fprintf(stderr, "Unable to set video: %s\n", SDL_GetError());
-	//	SDL_Delay( 5000 );
-    //    exit(EXIT_FAILURE);
-    //}
-
-    // Declare additional variables for the bouncing window effect
-    int windowX = 100, windowY = 100;  // Initial window position
-    int windowVelX = 5, windowVelY = 5; // Velocity of the window (pixels per frame)
-    int screenWidth = 640;  // Screen width
-    int screenHeight = 480; // Screen height
-
     // Init ASND.
     ASND_Init();
 
 	// This function initialises the attached controllers
 	WPAD_Init();
+    WPAD_SetDataFormat(WPAD_CHAN_0, WPAD_FMT_BTNS_ACC_IR); // Set the WPAD API IR format. Only call on startup.
 
     // Play BGM.
     PlayOgg(bgm_ogg, bgm_ogg_size, 0, OGG_INFINITE_TIME);
@@ -115,14 +126,11 @@ int main(int, char**)
         SDL_Log("Error creating SDL_Renderer!");
         return -1;
     }
+
+    // TODO: Log to file for Wii debug.
     //SDL_RendererInfo info;
     //SDL_GetRendererInfo(renderer, &info);
     //SDL_Log("Current SDL_Renderer: %s", info.name);
-
-    if (LWP_CreateThread(&buttonThread, buttonThreadFunc, NULL, NULL, 0, 80) != 0) {
-        printf("Failed to create button handler thread.\n");
-        return 1;
-    }
 
     // Setup Dear ImGui context
     IMGUI_CHECKVERSION();
@@ -160,6 +168,13 @@ int main(int, char**)
     bool show_demo_window = true;
     bool show_another_window = false;
     ImVec4 clear_color = ImVec4(0.45f, 0.55f, 0.60f, 1.00f);
+    ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+
+    // Start external input watcher thread.
+    if (LWP_CreateThread(&buttonThread, buttonThreadFunc, NULL, NULL, 0, 80) != 0) {
+        printf("Failed to create button handler thread.\n");
+        return 1;
+    }
 
     // Main loop
     bool done = false;
@@ -172,7 +187,7 @@ int main(int, char**)
         // Generally you may always pass all inputs to dear imgui, and hide them from your application based on those two flags.
         SDL_Event event;
         
-        /*
+        ///*
         while (SDL_PollEvent(&event))
         {
             ImGui_ImplSDL2_ProcessEvent(&event);
@@ -187,21 +202,7 @@ int main(int, char**)
             SDL_Delay(10);
             continue;
         }
-        */
-
-        // Bouncing window logic
-        windowX += windowVelX;  // Update position by velocity
-        windowY += windowVelY;
-
-        // Check for boundary collisions and reverse direction when necessary
-        if (windowX <= 0 || windowX >= screenWidth)  // Hit left or right edge
-        {
-            windowVelX = -windowVelX;  // Reverse X velocity
-        }
-        if (windowY <= 0 || windowY >= screenHeight)  // Hit top or bottom edge
-        {
-            windowVelY = -windowVelY;  // Reverse Y velocity
-        }
+        //*/
 
         // Start the Dear ImGui frame
         ImGui_ImplSDLRenderer2_NewFrame();
@@ -217,9 +218,6 @@ int main(int, char**)
             static float f = 0.0f;
             static int counter = 0;
 
-            // Modify this to bounce the window around the screen like the dvd logo for testing
-            ImGui::SetNextWindowPos(ImVec2(windowX,windowY), ImGuiCond_Always);
-
             ImGui::Begin("Hello, world!");                          // Create a window called "Hello, world!" and append into it.
 
             ImGui::Text("This is some useful text.");               // Display some text (you can use a format strings too)
@@ -234,9 +232,18 @@ int main(int, char**)
             ImGui::SameLine();
             ImGui::Text("counter = %d", counter);
             ImGui::Text("private counter = %d", prvCount);
-            ImGui::Text("KB Init: %s", isKBInit ? "Naw" : "Yas");
+            ImGui::Text("KB Init: %s", isKBInit ? "Yas" : "Naw");
+            ImGui::Text("KBCount: %d", keyCount);
 
             ImGui::Text("Application average %.3f ms/frame (%.1f FPS)", 1000.0f / io.Framerate, io.Framerate);
+
+            // FIXME: Implement
+            if (ImGui::TreeNode("Nintendo Wii Tests")) {
+                ImGui::Text("FIXME: Implement This");
+                ImGui::TreePop();
+            }
+
+            // Finalize Window
             ImGui::End();
         }
 

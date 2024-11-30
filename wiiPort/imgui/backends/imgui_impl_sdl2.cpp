@@ -340,16 +340,16 @@ bool ImGui_ImplSDL2_ProcessEvent(const SDL_Event* event)
 
     switch (event->type)
     {
-        case SDL_MOUSEMOTION:
-        {
-            if (ImGui_ImplSDL2_GetViewportForWindowID(event->motion.windowID) == NULL)
-                return false;
-            ImVec2 mouse_pos((float)event->motion.x, (float)event->motion.y);
-            io.AddMouseSourceEvent(event->motion.which == SDL_TOUCH_MOUSEID ? ImGuiMouseSource_TouchScreen : ImGuiMouseSource_Mouse);
-            io.AddMousePosEvent(mouse_pos.x, mouse_pos.y);
-            return true;
-        }
-        /*
+        //case SDL_MOUSEMOTION:
+        //{
+        //    if (ImGui_ImplSDL2_GetViewportForWindowID(event->motion.windowID) == NULL)
+        //        return false;
+        //    ImVec2 mouse_pos((float)event->motion.x, (float)event->motion.y);
+        //    io.AddMouseSourceEvent(event->motion.which == SDL_TOUCH_MOUSEID ? ImGuiMouseSource_TouchScreen : ImGuiMouseSource_Mouse);
+        //    io.AddMousePosEvent(mouse_pos.x, mouse_pos.y);
+        //    return true;
+        //}
+        
         case SDL_MOUSEWHEEL:
         {
             if (ImGui_ImplSDL2_GetViewportForWindowID(event->wheel.windowID) == NULL)
@@ -434,7 +434,7 @@ bool ImGui_ImplSDL2_ProcessEvent(const SDL_Event* event)
             bd->WantUpdateGamepadsList = true;
             return true;
         }
-        */
+        
     }
     return false;
 }
