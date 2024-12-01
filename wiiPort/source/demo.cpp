@@ -13,43 +13,370 @@
 #include "imgui.h"
 #include "imgui_impl_sdl2.h"
 #include "imgui_impl_sdlrenderer2.h"
+
 #include <stdio.h>
 #include <stdbool.h>
 #include <stdlib.h>
-#include <SDL2/SDL.h>
+#include <sys/time.h>
+#include <sys/unistd.h>
 
+#include <SDL2/SDL.h>
+#include <SDL2/SDL_image.h>
+#include <SDL2/SDL_ttf.h>
+#include <SDL2/SDL_mixer.h>
+
+#include <fat.h>
 #include <gccore.h>
 #include <wiiuse/wpad.h>
 #include <asndlib.h>
 #include <wiikeyboard/keyboard.h>
+#include <wiikeyboard/usbkeyboard.h>
 
+#include "renderer.h"
 #include "oggplayer.h"
 #include <bgm_ogg.h>
 
-#if !SDL_VERSION_ATLEAST(2,0,17)
-#error This backend requires SDL 2.0.17+ because of SDL_RenderGeometry() function
-#endif
-
+// SDL2 Fix
 #undef main
 
-// screen surface, the place where everything will get print onto
-SDL_Surface *screen = NULL;
-
-// IR Remote
+// Wii Remote.
 ir_t ir;
 
-// Quit on ESC?
+// Global variables.
 bool quitapp;
+bool isKBInit;
+bool imGuiReady;
+s8 _input_init = 0;
+u32 _kbd_pressed = 0;
+bool kbd_should_quit = false;
 
-// Button Thread.
+// Threads.
 lwp_t buttonThread;
+lwp_t renderThread;
+lwp_t kbd_handle;
+void* buttonThreadFunc(void* arg);
+void *kbd_thread (void *arg);
 
 // Counters.
 int keyCount;
 int prvCount;
+char *keyBuf;
+
+// SDL2 Init result
+typedef struct {
+    int             rC;
+    SDL_Window*     window;
+    SDL_Renderer*   renderer;
+} SDL2_Initresult_t;
+
+// Init Systems
+SDL2_Initresult_t Wii_Init(void);
+SDL2_Initresult_t game;
+
+extern ImGuiKey ImGui_ImplSDL2_KeyEventToImGuiKey(SDL_Keycode keycode, SDL_Scancode scancode);
+extern void ImGui_ImplSDL2_UpdateKeyModifiers(SDL_Keymod sdl_key_mods);
+
+// Functions
+void KBEventHandler(USBKeyboard_event event);
+void log_to_file(void *userdata, int category, SDL_LogPriority priority, const char *message);
+
+// Rendering
+void* render_thread(void* arg) {
+    // Setup Dear ImGui context
+    IMGUI_CHECKVERSION();
+    ImGui::CreateContext();
+    ImGuiIO& io = ImGui::GetIO(); (void)io;
+    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;     // Enable Keyboard Controls
+    io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;      // Enable Gamepad Controls
+    io.MouseDrawCursor = true;
+
+    // Setup Dear ImGui style
+    ImGuiStyle& style = ImGui::GetStyle();
+    ImGui::StyleColorsDark();
+
+    // Our Style.
+    style.WindowRounding = 6.0f;
+    style.FrameRounding = 6.0f;
+    style.PopupRounding = 6.0f;
+
+    // Color format: ABGR
+    //style.Colors[ImGuiCol_WindowBg] = ImVec4(1.00f, 0.06f, 0.06f, 0.06f);
+    //style.Colors[ImGuiCol_PopupBg]  = ImVec4(0.85f, 0.3f, 0.3f, 0.3f);
+
+    // Convert colors
+    // Normal: RGBA
+    // Modify: ABGR
+    for(int i=0; i<ImGuiCol_COUNT; i++) {
+        ImVec4 newColor = ImVec4(style.Colors[i].w,style.Colors[i].z,style.Colors[i].x,style.Colors[i].y);
+        style.Colors[i] = newColor;
+    }
+
+    // Setup Platform/Renderer backends
+    ImGui_ImplSDL2_InitForSDLRenderer(game.window, game.renderer);
+    ImGui_ImplSDLRenderer2_Init(game.renderer);
+    imGuiReady=true;
+
+    // Our state
+    bool show_demo_window = false;
+    bool show_another_window = false;
+
+    ImVec4 clear_color = ImVec4(0.0f, 0.0f, 0.0f, 1.00f);
+    ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+
+    // Main loop
+    bool done = false;
+    while (!done)
+    {
+        WPAD_IR(WPAD_CHAN_0, &ir);
+
+        // Pressed keys.
+        s32 pressed = WPAD_ButtonsDown(WPAD_CHAN_0);
+        if(pressed & WPAD_BUTTON_HOME) exit(0);
+
+        // Update Mouse Position
+        if(imGuiReady) {
+            ImVec2 nMousePos;
+            nMousePos.x = ir.x;
+            nMousePos.y = ir.y;
+            ImGui::SetMousePosExternal(nMousePos);
+        }
+
+        SDL_Event event;
+        while (SDL_PollEvent(&event))
+        {
+            ImGui_ImplSDL2_ProcessEvent(&event);
+        //    if (event.type == SDL_QUIT)
+        //        done = true;
+        //    if (event.type == SDL_WINDOWEVENT && event.window.event == SDL_WINDOWEVENT_CLOSE && event.window.windowID == SDL_GetWindowID(game.window))
+        //        done = true;
+        }
+
+        // Start the Dear ImGui frame
+        ImGui_ImplSDLRenderer2_NewFrame();
+        ImGui_ImplSDL2_NewFrame();
+        ImGui::NewFrame();
+
+        // Create a Window
+        ImGuiWindowFlags window_flags = 0;
+        window_flags |= ImGuiWindowFlags_NoMove;
+        window_flags |= ImGuiWindowFlags_NoResize;
+        window_flags |= ImGuiWindowFlags_NoCollapse;
+        window_flags |= ImGuiWindowFlags_MenuBar;
+
+        ImGui::SetNextWindowSize(ImVec2(500, 380), ImGuiCond_Appearing);
+        ImGui::SetNextWindowPos(ImVec2((640/2)-(500/2),(480/2)-(380/2)), ImGuiCond_Appearing);
+        ImGui::Begin("Wii Beans", NULL, window_flags);
+        if (ImGui::BeginMenuBar())
+        {
+            if (ImGui::BeginMenu("Menu"))
+            {
+                ImGui::SeparatorText("Test Menu Bar");
+                ImGui::MenuItem("Assets Browser", NULL, &show_demo_window);
+                ImGui::MenuItem("Exit", NULL, &done);
+                ImGui::EndMenu();
+            }
+            ImGui::EndMenuBar();
+        }
+        ImGui::Text("Test Window");
+        ImGui::Text("Keys: %s", keyBuf);
+        ImGui::ProgressBar(0.5f, ImVec2(0.0f, 0.0f));
+        ImGui::End();
+
+        // Demo
+        if(show_demo_window)
+            ImGui::ShowDemoWindow(&show_demo_window);
+
+        // Rendering
+        ImGui::Render();
+        SDL_RenderSetScale(game.renderer, io.DisplayFramebufferScale.x, io.DisplayFramebufferScale.y);
+        SDL_SetRenderDrawColor(game.renderer,
+            (Uint8)(clear_color.x * 255),
+            (Uint8)(clear_color.y * 255),
+            (Uint8)(clear_color.z * 255),
+            (Uint8)(clear_color.w * 255)
+        );
+        SDL_RenderClear(game.renderer);
+        ImGui_ImplSDLRenderer2_RenderDrawData(ImGui::GetDrawData(), game.renderer);
+        SDL_RenderPresent(game.renderer);
+    }
+
+    // Cleanup
+    ImGui_ImplSDLRenderer2_Shutdown();
+    ImGui_ImplSDL2_Shutdown();
+    ImGui::DestroyContext();
+
+    SDL_DestroyRenderer(game.renderer);
+    SDL_DestroyWindow(game.window);
+    SDL_Quit();
+
+    return NULL;
+}
+
+// Main code
+int main(int, char**)
+{
+    //keyBuf = (char*)malloc(1);
+    //keyBuf[0] = '\0';
+    game = Wii_Init();
+    if(game.rC != 0) {
+        SDL_Log("ERROR: %d, FAILURE\n", game.rC);
+        return -1;
+    }
+
+    // Start external input watcher thread.
+    if (LWP_CreateThread(&renderThread, render_thread, NULL, NULL, 0, 80) != 0) {
+        SDL_Log("Failed to create button handler thread.\n");
+        return -1;
+    }
+
+    while(true) {
+        usleep(800);
+    }
+
+    // Play BGM.
+    //PlayOgg(bgm_ogg, bgm_ogg_size, 0, OGG_INFINITE_TIME);
+}
+
+void kp(char sym) {
+    usleep(1000);
+    return;
+}
+
+// Init everything.
+SDL2_Initresult_t Wii_Init(void) {
+    SDL2_Initresult_t result;
+    result.rC = 0;
+
+    /*
+        Hardware
+    */
+
+    // Audio
+    ASND_Init();
+
+    // FAT (SD Card)
+    fatInitDefault();
+
+    // Open a log file for writing
+    FILE *logfile = fopen("sdl_log.txt", "w");
+    if (!logfile) {
+        printf("Failed to open log file: %s", SDL_GetError());
+        //result.rC = -1;
+        //return result;
+    }
+
+    // Controller
+	WPAD_Init();
+    WPAD_SetDataFormat(WPAD_CHAN_0, WPAD_FMT_BTNS_ACC_IR);
+
+	//USB_Initialize();	
+    if (KEYBOARD_Init(kp) == 0) {
+        isKBInit=true;
+    }
+    //USBKeyboard_Initialize();
+
+	// Even if the thread fails to start,
+	kbd_should_quit = false;
+
+    // Setup SDL
+    if (SDL_Init(SDL_INIT_VIDEO) != 0)
+    {
+        fprintf(logfile, "Error: %s\n", SDL_GetError());
+        result.rC = -1;
+        return result;
+    }
+
+    //KEYBOARD_Deinit();
+	if (USB_Initialize() != IPC_OK) {
+        result.rC = -1;
+		return result;
+    }
+
+	if (USBKeyboard_Initialize() != IPC_OK) {
+        result.rC = -1;
+		return result;
+	}
+
+    // Set custom log function to write logs to the file
+    SDL_LogSetOutputFunction(log_to_file, (void *)logfile);
+
+    // SDL2 ttf init
+    if (TTF_Init() != 0)
+    {
+        SDL_Log("TTF_Init Error: %s\n", SDL_GetError());
+        result.rC = -1;
+        return result;
+    }
+
+    // SDL2 image init
+    if (IMG_Init(IMG_INIT_PNG) != IMG_INIT_PNG)
+    {
+        SDL_Log("IMG_Init Error: %s\n", SDL_GetError());
+        result.rC = -1;
+        return result;
+    }
+
+    // Window
+    SDL_WindowFlags window_flags = (SDL_WindowFlags)(SDL_WINDOW_FULLSCREEN);
+    result.window = SDL_CreateWindow("Dear ImGui Wii", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 640, 480, window_flags);
+    if (result.window == nullptr)
+    {
+        SDL_Log("Error: SDL_CreateWindow(): %s\n", SDL_GetError());
+        result.rC = -1;
+        return result;
+    }
+
+    // Renderer
+    result.renderer = SDL_CreateRenderer(result.window, -1, SDL_RENDERER_PRESENTVSYNC); // SDL_RENDERER_ACCELERATED
+    if (result.renderer == nullptr)
+    {
+        SDL_Log("Error creating SDL_Renderer!");
+        result.rC = -1;
+        return result;
+    }
+
+    // sdl2 mixer init
+    /*
+    if (Mix_OpenAudio(44100, MIX_DEFAULT_FORMAT, 2, 2048) < 0)
+    {
+        SDL_Log("Mixer Error: %s\n", SDL_GetError());
+        result.rC = -1;
+        return result;
+    }
+    */
+
+    // TODO: Log to file for Wii debug.
+    SDL_RendererInfo info;
+    if (SDL_GetRendererInfo(result.renderer, &info) == 0) {
+        // Log renderer information
+        SDL_Log("Renderer: %s", info.name);
+        SDL_Log("Max Texture Size: %dx%d", info.max_texture_width, info.max_texture_height);
+        SDL_Log("Supported Texture Formats: %d", info.num_texture_formats);
+        for (int i = 0; i < info.num_texture_formats; ++i) {
+            SDL_Log(" - Format %d: %s", i, SDL_GetPixelFormatName(info.texture_formats[i]));
+        }
+    } else {
+        SDL_Log("Failed to get renderer info: %s", SDL_GetError());
+    }
+
+    /*
+        Threads
+    */
+
+    //gettimeofday(&_time_init, NULL);
+    
+    // Start external input watcher thread.
+    if (LWP_CreateThread(&buttonThread, buttonThreadFunc, NULL, NULL, 0, 80) != 0) {
+        SDL_Log("Failed to create button handler thread.\n");
+        result.rC = -1;
+        return result;
+    }
+
+    return result;
+}
 
 // Button Watcher Thread Function.
-static void* buttonThreadFunc(void* arg) {
+void* buttonThreadFunc(void* arg) {
     // Counters
     prvCount=0;
     keyCount=0;
@@ -58,222 +385,277 @@ static void* buttonThreadFunc(void* arg) {
     while(true) {
         // Scan for pad changes, and update IR.
         //WPAD_ScanPads();
-        WPAD_IR(WPAD_CHAN_0, &ir);
 
-        // Pressed keys.
-        s32 pressed = WPAD_ButtonsDown(WPAD_CHAN_0);
-        if(pressed & WPAD_BUTTON_HOME) exit(0);
-
-        // Update Mouse Position
-        ImVec2 nMousePos;
-        nMousePos.x = ir.x;
-        nMousePos.y = ir.y;
-        ImGui::SetMousePosExternal(nMousePos);        
+        if(!kbd_should_quit) {
+            if(!USBKeyboard_IsConnected())
+            {
+                USBKeyboard_Open(KBEventHandler);
+                //wake up the keyboard by sending it a command.
+                //im looking at you, you bastard LINQ keyboard.
+                USBKeyboard_SetLed(USBKEYBOARD_LEDCAPS, false);
+            }
+            USBKeyboard_Scan();
+        }
 
         // Thread wait, and increment counter.
-        SDL_Delay(10);
+        usleep(800);
         prvCount++;
     }
 }
 
-void keyPress_cb(char sym) {
-    keyCount++;
-	if ( sym == 0x1b) quitapp = true;
+// Function to map USB HID usage ID to SDL_Keycode
+SDL_Keycode USBKeyToSDLKeyCode(u32 usageID) {
+    switch (usageID) {
+        // Alphabet keys
+        case 0x04: return SDLK_a;   // Keyboard a and A
+        case 0x05: return SDLK_b;   // Keyboard b and B
+        case 0x06: return SDLK_c;   // Keyboard c and C
+        case 0x07: return SDLK_d;   // Keyboard d and D
+        case 0x08: return SDLK_e;   // Keyboard e and E
+        case 0x09: return SDLK_f;   // Keyboard f and F
+        case 0x0A: return SDLK_g;   // Keyboard g and G
+        case 0x0B: return SDLK_h;   // Keyboard h and H
+        case 0x0C: return SDLK_i;   // Keyboard i and I
+        case 0x0D: return SDLK_j;   // Keyboard j and J
+        case 0x0E: return SDLK_k;   // Keyboard k and K
+        case 0x0F: return SDLK_l;   // Keyboard l and L
+        case 0x10: return SDLK_m;   // Keyboard m and M
+        case 0x11: return SDLK_n;   // Keyboard n and N
+        case 0x12: return SDLK_o;   // Keyboard o and O
+        case 0x13: return SDLK_p;   // Keyboard p and P
+        case 0x14: return SDLK_q;   // Keyboard q and Q
+        case 0x15: return SDLK_r;   // Keyboard r and R
+        case 0x16: return SDLK_s;   // Keyboard s and S
+        case 0x17: return SDLK_t;   // Keyboard t and T
+        case 0x18: return SDLK_u;   // Keyboard u and U
+        case 0x19: return SDLK_v;   // Keyboard v and V
+        case 0x1A: return SDLK_w;   // Keyboard w and W
+        case 0x1B: return SDLK_x;   // Keyboard x and X
+        case 0x1C: return SDLK_y;   // Keyboard y and Y
+        case 0x1D: return SDLK_z;   // Keyboard z and Z
+
+        // Number keys (1 to 0)
+        case 0x1E: return SDLK_1;   // Keyboard 1 and !
+        case 0x1F: return SDLK_2;   // Keyboard 2 and @
+        case 0x20: return SDLK_3;   // Keyboard 3 and #
+        case 0x21: return SDLK_4;   // Keyboard 4 and $
+        case 0x22: return SDLK_5;   // Keyboard 5 and %
+        case 0x23: return SDLK_6;   // Keyboard 6 and ^
+        case 0x24: return SDLK_7;   // Keyboard 7 and &
+        case 0x25: return SDLK_8;   // Keyboard 8 and *
+        case 0x26: return SDLK_9;   // Keyboard 9 and (
+        case 0x27: return SDLK_0;   // Keyboard 0 and )
+
+        // Special keys
+        case 0x28: return SDLK_RETURN;  // Keyboard Return (ENTER)
+        case 0x29: return SDLK_ESCAPE;  // Keyboard ESCAPE
+        case 0x2A: return SDLK_BACKSPACE; // Keyboard DELETE (Backspace)
+        case 0x2B: return SDLK_TAB;  // Keyboard Tab
+        case 0x2C: return SDLK_SPACE;  // Keyboard Spacebar
+        case 0x2D: return SDLK_MINUS;  // Keyboard - and (underscore)
+        case 0x2E: return SDLK_EQUALS; // Keyboard = and +
+        case 0x2F: return SDLK_LEFTBRACKET; // Keyboard [ and {
+        case 0x30: return SDLK_RIGHTBRACKET; // Keyboard ] and }
+        case 0x31: return SDLK_BACKSLASH; // Keyboard \ and |
+        case 0x33: return SDLK_SEMICOLON; // Keyboard ; and :
+        case 0x34: return SDLK_QUOTE;  // Keyboard ‘ and “
+        //case 0x35: return SDLK_GRAVE;  // Keyboard Grave Accent and Tilde
+        case 0x36: return SDLK_COMMA; // Keyboard , and <
+        case 0x37: return SDLK_PERIOD; // Keyboard . and >
+        case 0x38: return SDLK_SLASH;  // Keyboard / and ?
+        case 0x39: return SDLK_CAPSLOCK;  // Keyboard Caps Lock
+
+        // Function keys
+        case 0x3A: return SDLK_F1;  // Keyboard F1
+        case 0x3B: return SDLK_F2;  // Keyboard F2
+        case 0x3C: return SDLK_F3;  // Keyboard F3
+        case 0x3D: return SDLK_F4;  // Keyboard F4
+        case 0x3E: return SDLK_F5;  // Keyboard F5
+        case 0x3F: return SDLK_F6;  // Keyboard F6
+        case 0x40: return SDLK_F7;  // Keyboard F7
+        case 0x41: return SDLK_F8;  // Keyboard F8
+        case 0x42: return SDLK_F9;  // Keyboard F9
+        case 0x43: return SDLK_F10;  // Keyboard F10
+        case 0x44: return SDLK_F11;  // Keyboard F11
+        case 0x45: return SDLK_F12;  // Keyboard F12
+
+        // Arrow keys and navigation keys
+        case 0x50: return SDLK_LEFT;  // Keyboard LeftArrow
+        case 0x51: return SDLK_DOWN;  // Keyboard DownArrow
+        case 0x52: return SDLK_UP;    // Keyboard UpArrow
+        case 0x53: return SDLK_RIGHT; // Keyboard RightArrow
+
+        // Keypad keys
+        case 0x54: return SDLK_KP_DIVIDE; // Keypad /
+        case 0x55: return SDLK_KP_MULTIPLY; // Keypad *
+        case 0x56: return SDLK_KP_MINUS;  // Keypad -
+        case 0x57: return SDLK_KP_PLUS;   // Keypad +
+        case 0x58: return SDLK_KP_ENTER;  // Keypad ENTER
+        case 0x59: return SDLK_KP_1;      // Keypad 1
+        case 0x5A: return SDLK_KP_2;      // Keypad 2
+        case 0x5B: return SDLK_KP_3;      // Keypad 3
+        case 0x5C: return SDLK_KP_4;      // Keypad 4
+        case 0x5D: return SDLK_KP_5;      // Keypad 5
+        case 0x5E: return SDLK_KP_6;      // Keypad 6
+        case 0x5F: return SDLK_KP_7;      // Keypad 7
+        case 0x60: return SDLK_KP_8;      // Keypad 8
+        case 0x61: return SDLK_KP_9;      // Keypad 9
+        case 0x62: return SDLK_KP_0;      // Keypad 0
+        case 0x63: return SDLK_KP_PERIOD; // Keypad .
+
+        // Modifier keys
+        case 0xE0: return SDLK_LCTRL;   // Keyboard LeftControl
+        case 0xE1: return SDLK_LSHIFT;  // Keyboard LeftShift
+        case 0xE2: return SDLK_LALT;    // Keyboard LeftAlt
+        case 0xE4: return SDLK_RCTRL;   // Keyboard RightControl
+        case 0xE5: return SDLK_RSHIFT;  // Keyboard RightShift
+        case 0xE6: return SDLK_RALT;    // Keyboard RightAlt
+
+        // Default case for unmapped keys
+        default:
+            SDL_Log("%s(): Error, Unknown UsageCode(0x%04x)\n", usageID);
+            return SDLK_UNKNOWN;
+    }
 }
 
-// Main code
-int main(int, char**)
-{
-    // Init Things
-    bool isKBInit = false;
-    if (KEYBOARD_Init(keyPress_cb) == 0) {
-        isKBInit=true;
+// Check if usageID is is a char
+bool USBKeyIsChar(u32 usageID) {
+    switch(usageID) {
+        // Alphabet keys
+        case 0x04: return true;   // Keyboard a and A
+        case 0x05: return true;   // Keyboard b and B
+        case 0x06: return true;   // Keyboard c and C
+        case 0x07: return true;   // Keyboard d and D
+        case 0x08: return true;   // Keyboard e and E
+        case 0x09: return true;   // Keyboard f and F
+        case 0x0A: return true;   // Keyboard g and G
+        case 0x0B: return true;   // Keyboard h and H
+        case 0x0C: return true;   // Keyboard i and I
+        case 0x0D: return true;   // Keyboard j and J
+        case 0x0E: return true;   // Keyboard k and K
+        case 0x0F: return true;   // Keyboard l and L
+        case 0x10: return true;   // Keyboard m and M
+        case 0x11: return true;   // Keyboard n and N
+        case 0x12: return true;   // Keyboard o and O
+        case 0x13: return true;   // Keyboard p and P
+        case 0x14: return true;   // Keyboard q and Q
+        case 0x15: return true;   // Keyboard r and R
+        case 0x16: return true;   // Keyboard s and S
+        case 0x17: return true;   // Keyboard t and T
+        case 0x18: return true;   // Keyboard u and U
+        case 0x19: return true;   // Keyboard v and V
+        case 0x1A: return true;   // Keyboard w and W
+        case 0x1B: return true;   // Keyboard x and X
+        case 0x1C: return true;   // Keyboard y and Y
+        case 0x1D: return true;   // Keyboard z and Z
+
+        // Number keys (1 to 0)
+        case 0x1E: return true;   // Keyboard 1 and !
+        case 0x1F: return true;   // Keyboard 2 and @
+        case 0x20: return true;   // Keyboard 3 and #
+        case 0x21: return true;   // Keyboard 4 and $
+        case 0x22: return true;   // Keyboard 5 and %
+        case 0x23: return true;   // Keyboard 6 and ^
+        case 0x24: return true;   // Keyboard 7 and &
+        case 0x25: return true;   // Keyboard 8 and *
+        case 0x26: return true;   // Keyboard 9 and (
+        case 0x27: return true;   // Keyboard 0 and )
+
+        // Special keys
+        //case 0x2A: return true; // Keyboard DELETE (Backspace)
+        case 0x2C: return true;  // Keyboard Spacebar
+        case 0x2D: return true;  // Keyboard - and (underscore)
+        case 0x2E: return true; // Keyboard = and +
+        case 0x2F: return true; // Keyboard [ and {
+        case 0x30: return true; // Keyboard ] and }
+        case 0x31: return true; // Keyboard \ and |
+        case 0x33: return true; // Keyboard ; and :
+        case 0x34: return true;  // Keyboard ‘ and “
+        case 0x36: return true; // Keyboard , and <
+        case 0x37: return true; // Keyboard . and >
+        case 0x38: return true;  // Keyboard / and ?
+
+        // Keypad keys
+        case 0x54: return true; // Keypad /
+        case 0x55: return true; // Keypad *
+        case 0x56: return true;  // Keypad -
+        case 0x57: return true;   // Keypad +
+        case 0x58: return true;  // Keypad ENTER
+        case 0x59: return true;      // Keypad 1
+        case 0x5A: return true;      // Keypad 2
+        case 0x5B: return true;      // Keypad 3
+        case 0x5C: return true;      // Keypad 4
+        case 0x5D: return true;      // Keypad 5
+        case 0x5E: return true;      // Keypad 6
+        case 0x5F: return true;      // Keypad 7
+        case 0x60: return true;      // Keypad 8
+        case 0x61: return true;      // Keypad 9
+        case 0x62: return true;      // Keypad 0
+        case 0x63: return true; // Keypad .
+        default: return false;
+    }
+}
+
+Uint16 USBKeyGetMods(u32 usageID) {
+    switch(usageID) {
+        // Modifier keys
+        case 0xE0: return KMOD_CTRL;   // Keyboard LeftControl
+        case 0xE1: return KMOD_SHIFT;  // Keyboard LeftShift
+        case 0xE2: return KMOD_ALT;    // Keyboard LeftAlt
+        case 0xE4: return KMOD_CTRL;   // Keyboard RightControl
+        case 0xE5: return KMOD_SHIFT;  // Keyboard RightShift
+        case 0xE6: return KMOD_RALT;    // Keyboard RightAlt
+        default: return KMOD_NONE;
+    }
+}
+
+void KBEventHandler(USBKeyboard_event event) {
+    if (event.type != USBKEYBOARD_PRESSED && event.type != USBKEYBOARD_RELEASED) {
+        return;
     }
 
-    // Setup SDL
-    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER) != 0)
-    {
-        printf("Error: %s\n", SDL_GetError());
-        return -1;
+    ImGuiIO& io = ImGui::GetIO();
+
+    char keyText;
+    Uint16 mod;
+    SDL_Event evt;
+    SDL_zero(evt); // Initialize the SDL event structure
+    if(event.type == USBKEYBOARD_PRESSED)
+        SDL_Log("KeyCode: 0x%02x\n", event.keyCode);
+
+    // Map the USB key code to an SDL scancode
+    //SDL_Scancode sdlsc; //event.keyCode;
+    SDL_Keycode sdlKey = USBKeyToSDLKeyCode(event.keyCode);
+    if (sdlKey == SDLK_UNKNOWN) {
+        return;  // If the key code is unknown, we do nothing
     }
 
-    // From 2.0.18: Enable native IME.
-#ifdef SDL_HINT_IME_SHOW_UI
-    SDL_SetHint(SDL_HINT_IME_SHOW_UI, "1");
-#endif
+    mod = USBKeyGetMods(event.keyCode);
 
-    // Init ASND.
-    ASND_Init();
+    evt.type = (event.type == USBKEYBOARD_PRESSED) ? SDL_KEYDOWN : SDL_KEYUP;
+    evt.key.type = (event.type == USBKEYBOARD_PRESSED) ? SDL_KEYDOWN : SDL_KEYUP;
+    evt.key.state = (event.type == USBKEYBOARD_PRESSED) ? SDL_PRESSED : SDL_RELEASED;
+    evt.key.keysym.sym = sdlKey;  // SDL key symbol (key code)
+    evt.key.keysym.scancode = SDL_GetScancodeFromKey(sdlKey); // SDL scancode
+    evt.key.keysym.mod = mod;  // You can add modifier keys if needed (SHIFT, CTRL, etc.)
+    keyText = (char)sdlKey;
 
-	// This function initialises the attached controllers
-	WPAD_Init();
-    WPAD_SetDataFormat(WPAD_CHAN_0, WPAD_FMT_BTNS_ACC_IR); // Set the WPAD API IR format. Only call on startup.
-
-    // Play BGM.
-    PlayOgg(bgm_ogg, bgm_ogg_size, 0, OGG_INFINITE_TIME);
-
-    // Create window with SDL_Renderer graphics context
-    SDL_WindowFlags window_flags = (SDL_WindowFlags)(SDL_WINDOW_FULLSCREEN);
-    SDL_Window* window = SDL_CreateWindow("Dear ImGui SDL2+SDL_Renderer example", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 640, 480, window_flags);
-    if (window == nullptr)
-    {
-        printf("Error: SDL_CreateWindow(): %s\n", SDL_GetError());
-        return -1;
+    // Push the event to SDL's event queue
+    ImGuiKey key = ImGui_ImplSDL2_KeyEventToImGuiKey(evt.key.keysym.sym, evt.key.keysym.scancode);
+    ImGui_ImplSDL2_UpdateKeyModifiers((SDL_Keymod)evt.key.keysym.mod);
+    if(event.type == USBKEYBOARD_PRESSED && USBKeyIsChar(event.keyCode)) {
+        io.AddInputCharacter(keyText);
+    } else {
+        io.AddKeyEvent(key, (evt.type == SDL_KEYDOWN));
+        io.SetKeyEventNativeData(key, evt.key.keysym.sym, evt.key.keysym.scancode, evt.key.keysym.scancode); // To support legacy indexing (<1.87 user code). Legacy backend uses SDLK_*** as indices to IsKeyXXX() functions.
     }
-    SDL_Renderer* renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_PRESENTVSYNC); // SDL_RENDERER_ACCELERATED
-    if (renderer == nullptr)
-    {
-        SDL_Log("Error creating SDL_Renderer!");
-        return -1;
+}
+
+// Log info to SD card from SDL2.
+void log_to_file(void *userdata, int category, SDL_LogPriority priority, const char *message) {
+    FILE *logfile = (FILE *)userdata;
+    if (logfile) {
+        fprintf(logfile, "%s\n", message);
+        fflush(logfile); // Ensure logs are written immediately
     }
-
-    // TODO: Log to file for Wii debug.
-    //SDL_RendererInfo info;
-    //SDL_GetRendererInfo(renderer, &info);
-    //SDL_Log("Current SDL_Renderer: %s", info.name);
-
-    // Setup Dear ImGui context
-    IMGUI_CHECKVERSION();
-    ImGui::CreateContext();
-    ImGuiIO& io = ImGui::GetIO(); (void)io;
-    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;     // Enable Keyboard Controls
-    io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;      // Enable Gamepad Controls
-
-    // Setup Dear ImGui style
-    ImGui::StyleColorsDark();
-    //ImGui::StyleColorsLight();
-
-    // Setup Platform/Renderer backends
-    ImGui_ImplSDL2_InitForSDLRenderer(window, renderer);
-    ImGui_ImplSDLRenderer2_Init(renderer);
-
-
-    // Load Fonts
-    // - If no fonts are loaded, dear imgui will use the default font. You can also load multiple fonts and use ImGui::PushFont()/PopFont() to select them.
-    // - AddFontFromFileTTF() will return the ImFont* so you can store it if you need to select the font among multiple.
-    // - If the file cannot be loaded, the function will return a nullptr. Please handle those errors in your application (e.g. use an assertion, or display an error and quit).
-    // - The fonts will be rasterized at a given size (w/ oversampling) and stored into a texture when calling ImFontAtlas::Build()/GetTexDataAsXXXX(), which ImGui_ImplXXXX_NewFrame below will call.
-    // - Use '#define IMGUI_ENABLE_FREETYPE' in your imconfig file to use Freetype for higher quality font rendering.
-    // - Read 'docs/FONTS.md' for more instructions and details.
-    // - Remember that in C/C++ if you want to include a backslash \ in a string literal you need to write a double backslash \\ !
-    //io.Fonts->AddFontDefault();
-    //io.Fonts->AddFontFromFileTTF("c:\\Windows\\Fonts\\segoeui.ttf", 18.0f);
-    //io.Fonts->AddFontFromFileTTF("../../misc/fonts/DroidSans.ttf", 16.0f);
-    //io.Fonts->AddFontFromFileTTF("../../misc/fonts/Roboto-Medium.ttf", 16.0f);
-    //io.Fonts->AddFontFromFileTTF("../../misc/fonts/Cousine-Regular.ttf", 15.0f);
-    //ImFont* font = io.Fonts->AddFontFromFileTTF("c:\\Windows\\Fonts\\ArialUni.ttf", 18.0f, nullptr, io.Fonts->GetGlyphRangesJapanese());
-    //IM_ASSERT(font != nullptr);
-
-    // Our state
-    bool show_demo_window = true;
-    bool show_another_window = false;
-    ImVec4 clear_color = ImVec4(0.45f, 0.55f, 0.60f, 1.00f);
-    ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
-
-    // Start external input watcher thread.
-    if (LWP_CreateThread(&buttonThread, buttonThreadFunc, NULL, NULL, 0, 80) != 0) {
-        printf("Failed to create button handler thread.\n");
-        return 1;
-    }
-
-    // Main loop
-    bool done = false;
-    while (!done)
-    {
-        // Poll and handle events (inputs, window resize, etc.)
-        // You can read the io.WantCaptureMouse, io.WantCaptureKeyboard flags to tell if dear imgui wants to use your inputs.
-        // - When io.WantCaptureMouse is true, do not dispatch mouse input data to your main application, or clear/overwrite your copy of the mouse data.
-        // - When io.WantCaptureKeyboard is true, do not dispatch keyboard input data to your main application, or clear/overwrite your copy of the keyboard data.
-        // Generally you may always pass all inputs to dear imgui, and hide them from your application based on those two flags.
-        SDL_Event event;
-        
-        ///*
-        while (SDL_PollEvent(&event))
-        {
-            ImGui_ImplSDL2_ProcessEvent(&event);
-            if (event.type == SDL_QUIT)
-                done = true;
-            if (event.type == SDL_WINDOWEVENT && event.window.event == SDL_WINDOWEVENT_CLOSE && event.window.windowID == SDL_GetWindowID(window))
-                done = true;
-        }
-
-        if (SDL_GetWindowFlags(window) & SDL_WINDOW_MINIMIZED)
-        {
-            SDL_Delay(10);
-            continue;
-        }
-        //*/
-
-        // Start the Dear ImGui frame
-        ImGui_ImplSDLRenderer2_NewFrame();
-        ImGui_ImplSDL2_NewFrame();
-        ImGui::NewFrame();
-
-        // 1. Show the big demo window (Most of the sample code is in ImGui::ShowDemoWindow()! You can browse its code to learn more about Dear ImGui!).
-        if (show_demo_window)
-            ImGui::ShowDemoWindow(&show_demo_window);
-
-        // 2. Show a simple window that we create ourselves. We use a Begin/End pair to create a named window.
-        {
-            static float f = 0.0f;
-            static int counter = 0;
-
-            ImGui::Begin("Hello, world!");                          // Create a window called "Hello, world!" and append into it.
-
-            ImGui::Text("This is some useful text.");               // Display some text (you can use a format strings too)
-            ImGui::Checkbox("Demo Window", &show_demo_window);      // Edit bools storing our window open/close state
-            ImGui::Checkbox("Another Window", &show_another_window);
-
-            ImGui::SliderFloat("float", &f, 0.0f, 1.0f);            // Edit 1 float using a slider from 0.0f to 1.0f
-            ImGui::ColorEdit3("clear color", (float*)&clear_color); // Edit 3 floats representing a color
-
-            if (ImGui::Button("Button"))                            // Buttons return true when clicked (most widgets return true when edited/activated)
-                counter++;
-            ImGui::SameLine();
-            ImGui::Text("counter = %d", counter);
-            ImGui::Text("private counter = %d", prvCount);
-            ImGui::Text("KB Init: %s", isKBInit ? "Yas" : "Naw");
-            ImGui::Text("KBCount: %d", keyCount);
-
-            ImGui::Text("Application average %.3f ms/frame (%.1f FPS)", 1000.0f / io.Framerate, io.Framerate);
-
-            // FIXME: Implement
-            if (ImGui::TreeNode("Nintendo Wii Tests")) {
-                ImGui::Text("FIXME: Implement This");
-                ImGui::TreePop();
-            }
-
-            // Finalize Window
-            ImGui::End();
-        }
-
-        // 3. Show another simple window.
-        if (show_another_window)
-        {
-            ImGui::Begin("Another Window", &show_another_window);   // Pass a pointer to our bool variable (the window will have a closing button that will clear the bool when clicked)
-            ImGui::Text("Hello from another window!");
-            if (ImGui::Button("Close Me"))
-                show_another_window = false;
-            ImGui::End();
-        }
-
-        // Rendering
-        ImGui::Render();
-        SDL_RenderSetScale(renderer, io.DisplayFramebufferScale.x, io.DisplayFramebufferScale.y);
-        SDL_SetRenderDrawColor(renderer, (Uint8)(clear_color.x * 255), (Uint8)(clear_color.y * 255), (Uint8)(clear_color.z * 255), (Uint8)(clear_color.w * 255));
-        SDL_RenderClear(renderer);
-        ImGui_ImplSDLRenderer2_RenderDrawData(ImGui::GetDrawData(), renderer);
-        SDL_RenderPresent(renderer);
-    }
-
-    // Cleanup
-    ImGui_ImplSDLRenderer2_Shutdown();
-    ImGui_ImplSDL2_Shutdown();
-    ImGui::DestroyContext();
-
-    SDL_DestroyRenderer(renderer);
-    SDL_DestroyWindow(window);
-    SDL_Quit();
-
-    return 0;
 }
