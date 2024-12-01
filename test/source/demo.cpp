@@ -63,11 +63,36 @@ void* render_thread(void* arg) {
     style.FrameRounding = 6.0f;
     style.PopupRounding = 6.0f;
 
+    /*
+        ============WARNING============
+        THIS IS TEMPORARY
+        This is to fix a small issue
+        that I'm still trying to
+        investigate, the problem is
+        Dear ImGui's color rendering
+        is all screwed up on Wii. I
+        determined why, but I am still
+        trying to find out how to
+        implement the fix.
+
+        The issue is all ImGui Windows
+        excpect to render in RGBA8888.
+        However, SDL2 on Wii only likes
+        ABGR8888. By converting all UI
+        colors to ABGR8888, this makes
+        it visually look more normal.
+        THIS IS NOT A SOLID SOLUTION!
+        ================================
+    */
+
     // Convert colors
-    // Normal: RGBA
-    // Modify: ABGR
+    // Expected: RGBA
+    // Platform Requires: ABGR
     for(int i=0; i<ImGuiCol_COUNT; i++) {
+        // Create a new color in ABGR format.
         ImVec4 newColor = ImVec4(style.Colors[i].w,style.Colors[i].z,style.Colors[i].x,style.Colors[i].y);
+
+        // Apply the color to the styles palette.
         style.Colors[i] = newColor;
     }
 
